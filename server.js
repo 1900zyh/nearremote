@@ -19,6 +19,8 @@ const MAX_TRUSTED_DEVICES = 100;
 const MAX_TRUST_STORE_BYTES = 128 * 1024;
 const MAX_FRAME_BYTES = 12 * 1024 * 1024;
 const FRAME_CACHE_MS = 15;
+const CURSOR_CACHE_MS = 25;
+const CURSOR_SHAPES = new Set(['arrow', 'text', 'hand', 'wait', 'crosshair', 'size-we', 'size-ns', 'size-nwse', 'size-nesw', 'move', 'not-allowed']);
 export const SCREEN_PROFILES = Object.freeze({
   balanced: Object.freeze({ maxWidth: 1920, maxHeight: 1080, quality: 88, label: '高清' }),
   sharp: Object.freeze({ maxWidth: 2560, maxHeight: 1440, quality: 92, label: '超清' }),
@@ -113,6 +115,37 @@ function tokenHash(token) {
 
 function validDeviceId(value) {
   return typeof value === 'string' && /^[A-Za-z0-9_-]{16,100}$/.test(value);
+}
+
+function serverIdentity(filename, suppliedId) {
+  const valid = (value) => typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(value);
+  if (suppliedId !== undefined) {
+    if (!valid(suppliedId)) throw new Error('serverId 必须是有效的 UUID');
+    return suppliedId;
+  }
+  if (!filename) return randomUUID();
+  const read = () => {
+    if (fsSync.statSync(filename).size > 4096) throw new Error('电脑标识文件过大');
+    const stored = JSON.parse(fsSync.readFileSync(filename, 'utf8'));
+    if (stored?.version !== 1 || !valid(stored.id)) throw new Error('电脑标识文件格式无效');
+    return stored.id;
+  };
+  try { return read(); }
+  catch (error) {
+    if (error.code !== 'ENOENT') throw new Error(`无法读取电脑标识：${error.message}。请检查 ${filename}，修复后重新启动。`);
+  }
+  const id = randomUUID();
+  try {
+    fsSync.mkdirSync(path.dirname(filename), { recursive: true, mode: 0o700 });
+    // Exclusive creation also keeps two simultaneous launchers on one identity.
+    fsSync.writeFileSync(filename, JSON.stringify({ version: 1, id }, null, 2), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+    return id;
+  } catch (error) {
+    if (error.code === 'EEXIST') {
+      try { return read(); } catch (cause) { throw new Error(`无法读取电脑标识：${cause.message}。请检查 ${filename}，修复后重新启动。`); }
+    }
+    throw new Error(`无法保存电脑标识：${error.message}。请检查 ${filename} 所在目录是否可写。`);
+  }
 }
 
 function readTrustStore(filename) {
@@ -359,8 +392,11 @@ export function createRemoteServer(options = {}) {
     throw new Error('远程控制主机端目前仅支持 Windows。');
   }
   const trustStorePath = options.trustStorePath ? path.resolve(options.trustStorePath) : null;
+  const identityPath = options.identityPath ? path.resolve(options.identityPath) : null;
+  const serverId = serverIdentity(identityPath, options.serverId);
   let trustedDevices = readTrustStore(trustStorePath);
   const state = {
+    serverId,
     deviceName: options.deviceName || os.hostname(),
     screen: options.screen || null,
     code: options.pairCode || String(randomInt(100000, 1_000_000)),
@@ -372,6 +408,7 @@ export function createRemoteServer(options = {}) {
   };
   const bridge = options.bridge || createPowerShellBridge(options.bridgeOptions);
   const captureBridge = options.captureBridge || bridge;
+  const cursorBridge = options.cursorBridge || bridge;
   const videoFactory = options.videoFactory || createFFmpegVideoFactory(options.videoOptions);
   const videoCapabilities = videoFactory.capabilities || {
     available: videoFactory.available !== false, endpoint: '/api/video.mp4', codec: VIDEO_PROFILES.balanced.codec,
@@ -412,6 +449,28 @@ export function createRemoteServer(options = {}) {
   const pendingCaptures = new Map();
   const captureQueue = [];
   let captureRunning = false;
+  let cursorSample = null;
+  let cursorSampling = null;
+  const cursorUnavailable = () => Object.assign(new Error('暂时无法读取电脑鼠标状态'), { status: 503 });
+  const getCursor = () => {
+    if (state.closed) return Promise.reject(cursorUnavailable());
+    if (cursorSample && Date.now() - cursorSample.sampledAt < CURSOR_CACHE_MS) return Promise.resolve(cursorSample);
+    if (cursorSampling) return cursorSampling;
+    cursorSampling = Promise.resolve().then(() => cursorBridge.send('cursor')).then((result) => {
+      const value = result?.data;
+      if (state.closed || !value || typeof value !== 'object'
+        || !Number.isFinite(value.x) || value.x < 0 || value.x > 1
+        || !Number.isFinite(value.y) || value.y < 0 || value.y > 1
+        || ['visible', 'leftDown', 'rightDown'].some((key) => typeof value[key] !== 'boolean')
+        || !CURSOR_SHAPES.has(value.shape)) throw cursorUnavailable();
+      cursorSample = {
+        cursor: { x: value.x, y: value.y, visible: value.visible, leftDown: value.leftDown, rightDown: value.rightDown, shape: value.shape },
+        sampledAt: Date.now(),
+      };
+      return cursorSample;
+    }).catch(() => { throw cursorUnavailable(); }).finally(() => { cursorSampling = null; });
+    return cursorSampling;
+  };
   const queueInput = (action, data = {}, ownerToken) => {
     const limit = action === 'button' && data.down === false ? 128 : 64;
     if (queuedInputs >= limit) {
@@ -580,6 +639,7 @@ export function createRemoteServer(options = {}) {
   const pairAttempts = rateLimiter({ windowMs: 10 * 60_000, max: MAX_PAIR_ATTEMPTS_PER_WINDOW });
   const pollAttempts = rateLimiter({ windowMs: 1000, max: 30 });
   const screenAttempts = rateLimiter({ windowMs: 1000, max: 45 });
+  const cursorAttempts = rateLimiter({ windowMs: 1000, max: 45 });
   const videoAttempts = rateLimiter({ windowMs: 10_000, max: 10 });
   const cleanupTimer = setInterval(cleanPairRequests, 30_000);
   cleanupTimer.unref();
@@ -645,12 +705,22 @@ export function createRemoteServer(options = {}) {
           state.refreshCode();
           return writeJson(res, 200, { ok: true, code: state.code, codeExpiresAt: new Date(state.codeExpiresAt).toISOString() });
         }
+        if (req.method === 'POST' && url.pathname === '/api/host/shutdown') {
+          await readJson(req, 2048);
+          // Finish the local authenticated request before closing its listener.
+          res.once('finish', () => setImmediate(() => {
+            void server.shutdown().then(() => server.emit('shutdown-complete')).catch((error) => server.emit('shutdown-error', error));
+          }));
+          return writeJson(res, 200, { ok: true });
+        }
         return writeJson(res, 404, { error: '未找到管理接口' });
       }
       if (req.method === 'GET' && url.pathname === '/api/status') {
         const codecsByFps = videoCodecsByFps(state.screen);
         return writeJson(res, 200, {
           service: 'nearremote',
+          serverId: state.serverId,
+          ...(local ? { localProcess: { pid: process.pid, projectDirectory: ROOT } } : {}),
           deviceName: state.deviceName,
           screen: state.screen || { width: 1920, height: 1080 },
           screenProfiles: screenProfileList(),
@@ -786,6 +856,14 @@ export function createRemoteServer(options = {}) {
         }
         return;
       }
+      if (req.method === 'GET' && url.pathname === '/api/cursor') {
+        const session = authenticate(req);
+        if (!session) return writeJson(res, 401, { error: '请先配对并授权' });
+        if (!cursorAttempts(session.token || session.ip)) return writeJson(res, 429, { error: '鼠标状态查询过于频繁' });
+        const sample = await getCursor();
+        if (!state.tokens.has(session.token)) return writeJson(res, 401, { error: '控制授权已撤销' });
+        return writeJson(res, 200, sample);
+      }
       if (req.method === 'GET' && url.pathname === '/api/screen.jpg') {
         const session = authenticate(req);
         if (!session) return writeJson(res, 401, { error: '请先配对并授权' });
@@ -875,6 +953,7 @@ export function createRemoteServer(options = {}) {
       job.reject(closedCaptureError());
     }
     if (captureBridge !== bridge) captureBridge.close?.();
+    if (cursorBridge !== bridge && cursorBridge !== captureBridge) cursorBridge.close?.();
     if (server.listening) await new Promise((resolve) => server.close(resolve));
     await releaseButtons();
     bridge.close?.();
@@ -904,7 +983,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     let server;
     try {
       const dataDir = process.env.REMOTE_DATA_DIR || path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'NearRemote');
-      server = createRemoteServer({ bridge, captureBridge, trustStorePath: path.join(dataDir, 'trusted-devices.json') });
+      server = createRemoteServer({ bridge, captureBridge, trustStorePath: path.join(dataDir, 'trusted-devices.json'), identityPath: path.join(dataDir, 'server-id.json') });
     } catch (error) {
       console.error(`无法启动服务：${error.message}`);
       bridge.close();
@@ -955,5 +1034,10 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     });
     process.once('SIGINT', () => server.shutdown().finally(() => process.exit(0)));
     process.once('SIGTERM', () => server.shutdown().finally(() => process.exit(0)));
+    server.once('shutdown-complete', () => process.exit(0));
+    server.once('shutdown-error', (error) => {
+      console.error(`无法正常停止服务：${error.message}`);
+      process.exit(1);
+    });
   }
 }

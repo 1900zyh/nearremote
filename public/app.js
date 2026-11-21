@@ -5,6 +5,9 @@ const TOKEN_KEY = 'nearremote.session';
 const NAME_KEY = 'nearremote.deviceName';
 const DEVICE_ID_KEY = 'nearremote.deviceId';
 const DISPLAY_KEY = 'nearremote.display';
+const AUTO_RECONNECT_KEY = 'nearremote.autoReconnect';
+const CURSOR_VISIBLE_KEY = 'nearremote.cursorVisible';
+const CURSOR_SHAPES = new Set(['arrow', 'text', 'hand', 'wait', 'crosshair', 'size-we', 'size-ns', 'size-nwse', 'size-nesw', 'move', 'not-allowed']);
 const SCREEN_PROFILES = new Set(['balanced', 'sharp', 'native']);
 const SCREEN_FRAME_RATES = new Set([10, 20, 30, 60, 90]);
 const MAX_SCREEN_BYTES = 12 * 1024 * 1024;
@@ -13,6 +16,8 @@ const readStored = (key) => { try { return sessionStorage.getItem(key); } catch 
 const store = (key, value) => { try { value ? sessionStorage.setItem(key, value) : sessionStorage.removeItem(key); } catch { /* Private browsing may disable storage. */ } };
 const clamp = (value, minimum = 0, maximum = 1) => Math.min(maximum, Math.max(minimum, value));
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const readPersistent = (key) => { try { return localStorage.getItem(key); } catch { return null; } };
+const autoReconnectEnabled = readPersistent(AUTO_RECONNECT_KEY) !== 'false';
 
 function displayPreferences() {
   try {
@@ -89,6 +94,10 @@ const state = {
   frameWidth: 0, frameHeight: 0, videoReady: false, videoResource: null, transport: 'jpeg',
   viewSignature: null,
   viewportZoom: 1, viewportPan: { x: 0, y: 0 }, panMode: false,
+  autoReconnect: autoReconnectEnabled, connectionWanted: Boolean(savedToken()) && autoReconnectEnabled,
+  manualPaused: false, recovering: false, reconnectTimer: null, reconnectAttempt: 0, connectionTask: null,
+  showCursor: readPersistent(CURSOR_VISIBLE_KEY) !== 'false', actualCursor: null,
+  cursorTask: null, cursorController: null, cursorUnsupported: false, lastLocalCursorAt: -Infinity,
 };
 
 const expandedView = {
@@ -97,7 +106,7 @@ const expandedView = {
 };
 
 class APIError extends Error {
-  constructor(message, status = 0) { super(message); this.status = status; }
+  constructor(message, status = 0, network = false) { super(message); this.status = status; this.network = network; }
 }
 
 async function api(path, { method = 'GET', data, token, signal, raw = false, keepalive = false } = {}) {
@@ -116,13 +125,13 @@ async function api(path, { method = 'GET', data, token, signal, raw = false, kee
     });
     if (!response.ok) {
       const result = await response.json().catch(() => ({}));
-      throw new APIError(result.error || `请求未成功（${response.status}）`, response.status);
+      throw new APIError(result.error || `请求未成功（${response.status}）`, response.status, response.status >= 500 || response.status === 408);
     }
     return raw ? await response.blob() : await response.json();
   } catch (error) {
-    if (error.name === 'AbortError') throw new APIError('电脑响应超时，请检查网络连接。');
+    if (error.name === 'AbortError') throw new APIError('电脑响应超时，请检查网络连接。', 0, true);
     if (error instanceof APIError) throw error;
-    throw new APIError('暂时无法连接电脑，请确认电脑开机、服务已启动，并连接同一网络。');
+    throw new APIError('暂时无法连接电脑，请确认电脑开机、服务已启动，并连接同一网络。', 0, true);
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener('abort', abort);
@@ -142,6 +151,128 @@ function setStatus(message, kind = 'idle') {
 
 function controlsEnabled() { return state.active && !state.paused && !state.revoking; }
 function hasVisualFrame() { return state.videoReady || Boolean(state.imageURL); }
+
+function cursorTrackingEnabled() {
+  return state.showCursor && !state.cursorUnsupported && Boolean(state.token)
+    && controlsEnabled() && hasVisualFrame() && !document.hidden && !state.destroying;
+}
+
+function stopCursorTracking() {
+  state.cursorController?.abort();
+}
+
+function validCursorSample(sample) {
+  return sample && typeof sample === 'object' && Number.isFinite(sample.x) && Number.isFinite(sample.y)
+    && sample.x >= 0 && sample.x <= 1 && sample.y >= 0 && sample.y <= 1
+    && typeof sample.visible === 'boolean' && typeof sample.leftDown === 'boolean' && typeof sample.rightDown === 'boolean'
+    && CURSOR_SHAPES.has(sample.shape);
+}
+
+function hasLocalCursorPrediction() {
+  return performance.now() - state.lastLocalCursorAt < 180 || Boolean(state.pendingPointer)
+    || state.pumping || state.held.size > 0;
+}
+
+function syncCursorTracking() {
+  if (!cursorTrackingEnabled()) { stopCursorTracking(); return; }
+  // A cancelled request drains before another tracker can start, including
+  // rapid pause/resume and quality changes. There is never a polling backlog.
+  if (state.cursorTask) return;
+  const token = state.token;
+  const controller = new AbortController();
+  state.cursorController = controller;
+  const task = (async () => {
+    while (cursorTrackingEnabled() && token === state.token && !controller.signal.aborted) {
+      const requestedAt = performance.now();
+      let delay = 50;
+      try {
+        const result = await api('/api/cursor', { token, signal: controller.signal });
+        if (controller.signal.aborted || token !== state.token || !cursorTrackingEnabled()) break;
+        const sample = result.cursor;
+        if (!validCursorSample(sample)) { delay = 500; }
+        else if (requestedAt >= state.lastLocalCursorAt) {
+          const previous = state.actualCursor;
+          const changed = !previous || ['x', 'y', 'visible', 'leftDown', 'rightDown', 'shape'].some((key) => previous[key] !== sample[key]);
+          state.actualCursor = { ...sample };
+          if (!hasLocalCursorPrediction()) {
+            state.pointer = { x: sample.x, y: sample.y };
+            if (previous && !previous.leftDown && sample.leftDown) pulseCursor('left');
+            if (previous && !previous.rightDown && sample.rightDown) pulseCursor('right');
+          }
+          if (changed || cursor.dataset.source !== 'computer') updateCursor();
+        }
+      } catch (error) {
+        if (controller.signal.aborted || token !== state.token || !cursorTrackingEnabled()) break;
+        if (error.status === 401) { forgetSession('电脑已撤销这台手机的授权，请重新配对。'); break; }
+        if (error.status === 404) { state.cursorUnsupported = true; state.actualCursor = null; updateCursor(); break; }
+        // Cursor telemetry is independent of the picture and control channels.
+        // A transient cursor error must not interrupt a working video session.
+        delay = 1000;
+      }
+      await waitForFrame(Math.max(0, delay - (performance.now() - requestedAt)), controller.signal);
+    }
+  })();
+  state.cursorTask = task;
+  void task.catch(() => {}).finally(() => {
+    if (state.cursorTask === task) state.cursorTask = null;
+    if (state.cursorController === controller) state.cursorController = null;
+    if (cursorTrackingEnabled()) syncCursorTracking();
+  });
+}
+
+$('show-cursor')?.addEventListener('change', () => {
+  state.showCursor = $('show-cursor').checked;
+  state.cursorUnsupported = false;
+  try { localStorage.setItem(CURSOR_VISIBLE_KEY, String(state.showCursor)); } catch { /* The open page can still toggle it. */ }
+  updateCursor();
+  syncCursorTracking();
+});
+
+function cancelReconnect(resetAttempt = false) {
+  clearTimeout(state.reconnectTimer);
+  state.reconnectTimer = null;
+  if (resetAttempt) state.reconnectAttempt = 0;
+}
+
+function shouldReconnect() {
+  return state.autoReconnect && state.connectionWanted && !state.manualPaused && Boolean(state.token)
+    && !state.revoking && !state.pairing && !state.destroying && !document.hidden;
+}
+
+function scheduleReconnect(immediate = false) {
+  if (!shouldReconnect() || controlsEnabled() || state.reconnectTimer || state.connectionTask || state.restoring) return;
+  const delay = immediate ? 0 : Math.min(15_000, 2000 * 2 ** Math.min(3, state.reconnectAttempt++));
+  if (delay) {
+    setStatus(`等待电脑恢复 · ${delay / 1000} 秒后重试`, 'pending');
+    notice('这台电脑的配对已记住。服务启动或网络恢复后会自动连接，无需重新输入配对码。');
+  }
+  state.reconnectTimer = setTimeout(() => {
+    state.reconnectTimer = null;
+    if (shouldReconnect()) void initializeConnection();
+  }, delay);
+}
+
+function recoverConnection(message = '连接暂时中断，配对信息已保留。') {
+  if (!state.token || state.revoking || state.manualPaused) return;
+  pause(false, true);
+  state.active = false;
+  state.recovering = true;
+  state.host = null;
+  setStatus('等待电脑重新连接', 'pending');
+  render();
+  notice(state.autoReconnect ? `${message} 正在等待自动恢复。` : `${message} 请点击「恢复连接」重试。`, 'warning');
+  scheduleReconnect();
+}
+
+$('auto-reconnect')?.addEventListener('change', () => {
+  state.autoReconnect = $('auto-reconnect').checked;
+  try { localStorage.setItem(AUTO_RECONNECT_KEY, String(state.autoReconnect)); } catch { /* Keep the preference for this open page. */ }
+  if (!state.autoReconnect) cancelReconnect();
+  else if (state.token && !state.manualPaused) {
+    state.connectionWanted = true;
+    scheduleReconnect(true);
+  }
+});
 
 function desktopLayout() {
   const width = Math.max(1, Number(state.host?.screen.width) || state.frameWidth || 1920);
@@ -223,7 +354,12 @@ function render() {
   $('connected-info').hidden = !state.token;
   $('pair-button').disabled = state.pairing || !state.host;
   $('disconnect-button').disabled = state.revoking || state.restoring;
-  $('disconnect-button').textContent = state.revoking ? '正在撤销授权…' : '断开并撤销授权';
+  $('disconnect-button').textContent = '断开连接';
+  if ($('forget-device-button')) {
+    $('forget-device-button').disabled = state.revoking || state.restoring;
+    $('forget-device-button').textContent = state.revoking ? '正在撤销授权…' : '忘记此电脑并撤销授权';
+  }
+  if ($('auto-reconnect')) $('auto-reconnect').checked = state.autoReconnect;
   $('pause-button').disabled = !enabled;
   $('resume-button').disabled = state.revoking || state.restoring;
   $('reconnect-button').disabled = state.revoking || state.restoring;
@@ -241,11 +377,16 @@ function render() {
   $('send-text').disabled = !enabled || !$('text-input').value.length;
   $('pair-code').disabled = state.pairing;
   $('device-name').disabled = state.pairing;
-  cursor.toggleAttribute('hidden', !hasVisualFrame() || !enabled);
+  if ($('show-cursor')) $('show-cursor').checked = state.showCursor;
+  updateCursor();
+  syncCursorTracking();
   updateZoomControls();
 }
 
 function clearImage() {
+  stopCursorTracking();
+  clearTimeout(cursorFeedbackTimer);
+  cursorPulse.classList.remove('active');
   cleanupVideo();
   $('screen-image').removeAttribute('src');
   if (state.imageURL) URL.revokeObjectURL(state.imageURL);
@@ -508,9 +649,15 @@ async function runVideoStream({ controller: parentController, token, profile, ge
     await sourceOpened;
     if (Source === window.ManagedMediaSource && !resource.streaming) await waitMediaEvent(source, 'startstreaming', signal, 5000);
     const query = new URLSearchParams({ profile, fps: String(fps) });
-    const response = await fetch(`/api/video.mp4?${query}`, {
-      headers: { Authorization: `Bearer ${token}`, Accept: 'video/mp4' }, cache: 'no-store', signal,
-    });
+    let response;
+    try {
+      response = await fetch(`/api/video.mp4?${query}`, {
+        headers: { Authorization: `Bearer ${token}`, Accept: 'video/mp4' }, cache: 'no-store', signal,
+      });
+    } catch (error) {
+      if (signal.aborted) throw error;
+      throw new APIError('视频连接暂时中断。', 0, true);
+    }
     if (!response.ok) {
       const result = await response.json().catch(() => ({}));
       throw new APIError(result.error || '视频通道暂不可用。', response.status);
@@ -529,8 +676,14 @@ async function runVideoStream({ controller: parentController, token, profile, ge
         // ManagedMediaSource has explicitly stopped requesting media.
         await waitMediaEvent(source, 'startstreaming', signal, 1500);
       }
-      const { done, value } = await resource.reader.read();
-      if (done) throw new APIError('视频连接已结束。');
+      let result;
+      try { result = await resource.reader.read(); }
+      catch (error) {
+        if (signal.aborted) throw error;
+        throw new APIError('视频连接暂时中断。', 0, true);
+      }
+      const { done, value } = result;
+      if (done) throw new APIError('视频连接已结束。', 0, true);
       if (!value?.byteLength) continue;
       if (value.byteLength > 4 * 1024 * 1024) throw new APIError('视频缓冲过大，已切换兼容画面。');
       resource.totalBytes += value.byteLength;
@@ -579,8 +732,12 @@ function startFrames() {
         return;
       } catch (error) {
         if (generation !== state.frameGeneration || !controlsEnabled() || controller.signal.aborted) return;
-        if (error.status === 401 || error.status === 403) {
+        if (error.status === 401) {
           forgetSession('电脑已撤销这台手机的授权，请重新配对。');
+          return;
+        }
+        if (error.network || error.status === 403) {
+          recoverConnection('视频连接暂时中断，配对信息已保留。');
           return;
         }
         cleanupVideo();
@@ -623,7 +780,11 @@ function startFrames() {
         if (firstFrame) render();
       } catch (error) {
         if (generation !== state.frameGeneration || !controlsEnabled()) break;
-        if (error.status === 401 || error.status === 403) { forgetSession('电脑已撤销授权，或服务已重启。请重新配对。'); break; }
+        if (error.status === 401) { forgetSession('电脑已撤销这台手机的授权，请重新配对。'); break; }
+        if (error.network || error.status === 403) {
+          recoverConnection('电脑服务或网络暂时不可用，配对信息已保留。');
+          break;
+        }
         $('preview-state').textContent = '网络不稳定，正在重试';
         retryDelay = 1300;
       }
@@ -637,6 +798,7 @@ function startFrames() {
 }
 
 function beginSession(token, initialImageURL = null) {
+  cancelReconnect(true);
   state.token = token;
   const persistent = rememberToken(token);
   state.restoring = false;
@@ -644,6 +806,12 @@ function beginSession(token, initialImageURL = null) {
   state.active = true;
   state.paused = false;
   state.pairing = false;
+  state.manualPaused = false;
+  state.connectionWanted = true;
+  state.recovering = false;
+  state.actualCursor = null;
+  state.cursorUnsupported = false;
+  state.lastLocalCursorAt = -Infinity;
   state.epoch++;
   state.queue.length = 0;
   $('pair-code').value = '';
@@ -662,6 +830,10 @@ function beginSession(token, initialImageURL = null) {
 }
 
 function forgetSession(message) {
+  cancelReconnect(true);
+  state.connectionWanted = false;
+  state.manualPaused = true;
+  state.recovering = false;
   if (expandedView.active) exitExpanded();
   stopFrames();
   const forgottenToken = state.token;
@@ -727,6 +899,7 @@ $('pair-form').addEventListener('submit', async (event) => {
     }
     state.requestId = result.requestId;
     store(NAME_KEY, name);
+    try { localStorage.setItem(NAME_KEY, name); } catch { /* The tab-local name remains available. */ }
     const expiresAt = Date.parse(result.expiresAt) || Date.now() + 180_000;
     while (generation === state.pairGeneration && Date.now() < expiresAt) {
       await sleep(1000);
@@ -775,6 +948,11 @@ $('cancel-pair-button').addEventListener('click', () => {
 
 async function resume(automatic = false, hostAlreadyChecked = false) {
   if (!state.token || state.revoking || state.restoring || document.hidden) return;
+  if (!automatic) {
+    state.manualPaused = false;
+    state.connectionWanted = true;
+    cancelReconnect(true);
+  } else if (!shouldReconnect()) return;
   const token = state.token;
   const generation = ++state.resumeGeneration;
   state.restoring = true;
@@ -784,6 +962,7 @@ async function resume(automatic = false, hostAlreadyChecked = false) {
   if (!state.host) {
     state.restoring = false;
     render();
+    scheduleReconnect();
     return;
   }
   setStatus(automatic ? '正在自动连接' : '正在恢复控制', 'pending');
@@ -797,7 +976,7 @@ async function resume(automatic = false, hostAlreadyChecked = false) {
     const image = new Image();
     image.src = imageURL;
     await image.decode();
-    if (generation !== state.resumeGeneration || token !== state.token || document.hidden) {
+    if (generation !== state.resumeGeneration || token !== state.token || document.hidden || (automatic && !shouldReconnect())) {
       URL.revokeObjectURL(imageURL);
       return;
     }
@@ -813,16 +992,19 @@ async function resume(automatic = false, hostAlreadyChecked = false) {
   } catch (error) {
     if (imageURL) URL.revokeObjectURL(imageURL);
     if (generation !== state.resumeGeneration || token !== state.token) return;
-    if (error.status === 401 || error.status === 403) {
+    if (error.status === 401) {
       forgetSession('电脑已撤销这台手机的授权，请输入新的配对码重新连接。');
     } else {
       setStatus('暂时无法连接', 'error');
-      notice('暂时无法连接电脑，已保存的配对仍保留。请确认电脑服务和 Wi-Fi，再点击「恢复连接」。', 'warning');
+      notice(state.autoReconnect
+        ? '暂时无法连接电脑，已保存的配对仍保留。电脑服务恢复后会自动连接。'
+        : '暂时无法连接电脑，已保存的配对仍保留。请确认电脑服务和 Wi-Fi，再点击「恢复连接」。', 'warning');
     }
   } finally {
     if (generation === state.resumeGeneration) {
       state.restoring = false;
       render();
+      scheduleReconnect();
     }
   }
 }
@@ -849,7 +1031,19 @@ async function revoke() {
     render();
   }
 }
-$('disconnect-button').addEventListener('click', () => void revoke());
+$('forget-device-button')?.addEventListener('click', () => void revoke());
+$('disconnect-button').addEventListener('click', () => {
+  if (!state.token || state.revoking) return;
+  pause();
+  state.active = false;
+  state.paused = false;
+  clearImage();
+  if (expandedView.active) exitExpanded();
+  setStatus('已断开 · 配对已记住');
+  $('connection-panel').open = true;
+  render();
+  notice('已断开连接，配对授权仍保留。点击「恢复连接」即可继续，无需重新输入配对码。');
+});
 
 function queueRelease({ immediate = false } = {}) {
   if (!state.token) return;
@@ -862,8 +1056,14 @@ function queueRelease({ immediate = false } = {}) {
   }
 }
 
-function pause(background = false) {
+function pause(background = false, recovering = false) {
   if (!state.token) return;
+  cancelReconnect();
+  if (!background && !recovering) {
+    state.connectionWanted = false;
+    state.manualPaused = true;
+    state.recovering = false;
+  }
   state.restoring = false;
   state.resumeGeneration++;
   stopFrames();
@@ -922,10 +1122,9 @@ async function pump() {
       });
     } catch (error) {
       if (job.token !== state.token || job.epoch !== state.epoch) continue;
-      if (error.status === 401 || error.status === 403) { forgetSession('控制授权已失效，请重新配对。'); break; }
+      if (error.status === 401) { forgetSession('控制授权已失效，请重新配对。'); break; }
       if (job.action !== 'release') {
-        pause();
-        notice('控制指令发送失败，已暂停操作。网络恢复后请点击「继续控制」。', 'warning');
+        recoverConnection('控制指令未能送达，已丢弃待发送操作，配对信息保留。');
       }
     }
   }
@@ -945,6 +1144,7 @@ function setPointer(x, y, force = false) {
     x: clamp(x, region.x / desktopX, (region.x + region.width - 1) / desktopX),
     y: clamp(y, region.y / desktopY, (region.y + region.height - 1) / desktopY),
   };
+  state.lastLocalCursorAt = performance.now();
   updateCursor();
   state.pendingPointer = { action: 'pointer', ...state.pointer };
   const elapsed = performance.now() - state.lastPointerAt;
@@ -966,6 +1166,9 @@ function button(buttonName, down) {
   flushPointer();
   if (!enqueue({ action: 'button', button: buttonName, down })) return false;
   down ? state.held.add(buttonName) : state.held.delete(buttonName);
+  state.lastLocalCursorAt = performance.now();
+  if (down) pulseCursor(buttonName);
+  updateCursor();
   return true;
 }
 
@@ -976,7 +1179,11 @@ function click(buttonName = 'left') {
     return;
   }
   flushPointer();
-  enqueue({ action: 'click', button: buttonName, ...state.pointer });
+  if (enqueue({ action: 'click', button: buttonName, ...state.pointer })) {
+    state.lastLocalCursorAt = performance.now();
+    pulseCursor(buttonName);
+    updateCursor();
+  }
 }
 $('left-button').addEventListener('click', () => click());
 $('right-button').addEventListener('click', () => click('right'));
@@ -988,15 +1195,52 @@ $('drag-button').addEventListener('click', () => {
 });
 
 const cursor = document.createElementNS(SVG_NS, 'svg');
+cursor.id = 'remote-cursor';
 cursor.classList.add('screen-pointer');
 cursor.setAttribute('aria-hidden', 'true');
+cursor.setAttribute('preserveAspectRatio', 'none');
 const cursorGroup = document.createElementNS(SVG_NS, 'g');
+const cursorHeld = document.createElementNS(SVG_NS, 'circle');
+cursorHeld.classList.add('cursor-held');
+cursorHeld.setAttribute('r', '13');
+const cursorPulse = document.createElementNS(SVG_NS, 'circle');
+cursorPulse.classList.add('cursor-pulse');
+cursorPulse.setAttribute('r', '12');
+const cursorGlyph = document.createElementNS(SVG_NS, 'g');
+cursorGlyph.classList.add('cursor-glyph');
+cursorGlyph.setAttribute('transform', 'scale(1.1)');
 const cursorPath = document.createElementNS(SVG_NS, 'path');
 cursorPath.classList.add('cursor-shadow');
-cursorPath.setAttribute('d', 'M0 0v17l4.5-4 3.2 7 3-1.4-3.1-6.8 6-.3Z');
-cursorGroup.append(cursorPath);
+const CURSOR_GLYPHS = {
+  arrow: 'M0 0v17l4.5-4 3.2 7 3-1.4-3.1-6.8 6-.3Z',
+  text: 'M-6-10h12M0-10v20M-6 10H6',
+  hand: 'M0 0c-1.2 0-2 1-2 2v9l-2-2c-2-2-4 0-3 2l6 9h9l4-6V7c0-2-3-2-3 0V5c0-2-3-2-3 0V4c0-2-3-2-3 0v7V2c0-1-.8-2-2-2Z',
+  wait: 'M0-9a9 9 0 1 1-8 4M-8-9v4h4',
+  crosshair: 'M-11 0h22M0-11v22M-4-4h8v8h-8Z',
+  'size-we': 'M-12 0h24M-7-5l-5 5 5 5M7-5l5 5-5 5',
+  'size-ns': 'M0-12v24M-5-7l5-5 5 5M-5 7l5 5 5-5',
+  'size-nwse': 'M-9-9 9 9M-9-2v-7h7M2 9h7V2',
+  'size-nesw': 'M-9 9 9-9M-9 2v7h7M2-9h7v7',
+  move: 'M-11 0h22M0-11v22M-7-4l-4 4 4 4M7-4l4 4-4 4M-4-7l4-4 4 4M-4 7l4 4 4-4',
+  'not-allowed': 'M-9 0a9 9 0 1 0 18 0 9 9 0 1 0-18 0M-6-6 6 6',
+};
+cursorGlyph.append(cursorPath);
+cursorGroup.append(cursorHeld, cursorPulse, cursorGlyph);
 cursor.append(cursorGroup);
 $('screen-surface').append(cursor);
+let cursorFeedbackTimer = null;
+
+function pulseCursor(buttonName) {
+  if (!state.showCursor || !controlsEnabled() || !hasVisualFrame()) return;
+  cursor.dataset.feedback = buttonName;
+  cursorPulse.classList.remove('active');
+  // Clicks are infrequent; restarting only this small animation avoids keeping
+  // any animation or layout work in the 90 fps picture-rendering loop.
+  void cursorPulse.getBoundingClientRect();
+  cursorPulse.classList.add('active');
+  clearTimeout(cursorFeedbackTimer);
+  cursorFeedbackTimer = setTimeout(() => { cursorPulse.classList.remove('active'); }, 420);
+}
 
 function imageGeometry() {
   const surface = $('screen-surface');
@@ -1041,10 +1285,32 @@ function imageGeometry() {
 
 function updateCursor() {
   const geometry = imageGeometry();
-  cursor.setAttribute('viewBox', `0 0 ${geometry.localWidth || 1} ${geometry.localHeight || 1}`);
-  const x = (state.pointer.x * Math.max(1, geometry.region.desktopWidth - 1) - geometry.region.x) / Math.max(1, geometry.region.width - 1);
-  const y = (state.pointer.y * Math.max(1, geometry.region.desktopHeight - 1) - geometry.region.y) / Math.max(1, geometry.region.height - 1);
-  cursorGroup.setAttribute('transform', `translate(${geometry.left + geometry.width * x},${geometry.top + geometry.height * y})`);
+  const predicted = !state.actualCursor || hasLocalCursorPrediction();
+  const sample = predicted ? null : state.actualCursor;
+  const position = sample || state.pointer;
+  const shape = sample?.shape || 'arrow';
+  const desktopX = Math.max(1, geometry.region.desktopWidth - 1);
+  const desktopY = Math.max(1, geometry.region.desktopHeight - 1);
+  const x = (position.x * desktopX - geometry.region.x) / Math.max(1, geometry.region.width - 1);
+  const y = (position.y * desktopY - geometry.region.y) / Math.max(1, geometry.region.height - 1);
+  const screenX = geometry.left + Math.max(0, geometry.width - 1) * x;
+  const screenY = geometry.top + Math.max(0, geometry.height - 1) * y;
+  const inRegion = x >= -0.000001 && x <= 1.000001 && y >= -0.000001 && y <= 1.000001;
+  const inViewport = screenX >= 0 && screenX < geometry.localWidth && screenY >= 0 && screenY < geometry.localHeight;
+  const shown = state.showCursor && controlsEnabled() && hasVisualFrame() && !document.hidden && !state.destroying
+    && (predicted || sample.visible) && inRegion && inViewport;
+  const left = predicted ? state.held.has('left') : sample.leftDown;
+  const right = predicted ? state.held.has('right') : sample.rightDown;
+  const pressed = left && right ? 'both' : left ? 'left' : right ? 'right' : 'none';
+  const attributes = { x: position.x.toFixed(6), y: position.y.toFixed(6), shape,
+    source: predicted ? 'local' : 'computer', pressed, visible: String(shown) };
+  for (const [name, value] of Object.entries(attributes)) if (cursor.dataset[name] !== value) cursor.dataset[name] = value;
+  const viewBox = `0 0 ${geometry.localWidth || 1} ${geometry.localHeight || 1}`;
+  if (cursor.getAttribute('viewBox') !== viewBox) cursor.setAttribute('viewBox', viewBox);
+  const transform = `translate(${screenX},${screenY})`;
+  if (cursorGroup.getAttribute('transform') !== transform) cursorGroup.setAttribute('transform', transform);
+  if (cursorPath.getAttribute('d') !== CURSOR_GLYPHS[shape]) cursorPath.setAttribute('d', CURSOR_GLYPHS[shape]);
+  cursor.toggleAttribute('hidden', !shown);
 }
 
 function pointOnImage(event, restrict = true) {
@@ -1460,12 +1726,28 @@ document.addEventListener('fullscreenchange', () => {
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && expandedView.active) exitExpanded();
 });
-document.addEventListener('visibilitychange', () => { if (document.hidden) pause(true); });
+function restoreVisibleConnection() {
+  if (document.hidden) return;
+  state.destroying = false;
+  if (shouldReconnect() && !controlsEnabled()) {
+    cancelReconnect();
+    void initializeConnection();
+  }
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) { cancelReconnect(); pause(true); }
+  else restoreVisibleConnection();
+});
 window.addEventListener('blur', () => {
   if (controlsEnabled() && performance.now() >= expandedView.transitionUntil) pause(true);
 });
+window.addEventListener('focus', restoreVisibleConnection);
 window.addEventListener('pagehide', () => { state.destroying = true; pause(true); });
-window.addEventListener('online', () => { if (!state.active && !document.hidden) void initializeConnection(); });
+window.addEventListener('pageshow', restoreVisibleConnection);
+window.addEventListener('online', restoreVisibleConnection);
+window.addEventListener('offline', () => {
+  if (state.token && !state.manualPaused && state.connectionWanted) recoverConnection('网络已断开，配对信息保留。');
+});
 window.addEventListener('resize', updateExpandedLayout);
 window.addEventListener('orientationchange', () => {
   releaseLayoutGesture();
@@ -1480,13 +1762,22 @@ setInterval(() => {
   for (const heldButton of state.held) enqueue({ action: 'button', button: heldButton, down: true });
 }, 3000);
 
-$('device-name').value = readStored(NAME_KEY) || (isTabletDevice() ? '我的 iPad' : /iPhone|iPod/.test(navigator.userAgent) ? '我的 iPhone' : /Android/.test(navigator.userAgent) ? '我的手机' : '我的浏览器');
+$('device-name').value = readPersistent(NAME_KEY) || readStored(NAME_KEY) || (isTabletDevice() ? '我的 iPad' : /iPhone|iPod/.test(navigator.userAgent) ? '我的 iPhone' : /Android/.test(navigator.userAgent) ? '我的手机' : '我的浏览器');
 $('computer-address').textContent = location.host;
 $('host-link').hidden = !['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
-if (state.token) notice('已记住这台电脑，正在自动连接…');
+if (state.token) notice(state.autoReconnect ? '已记住这台电脑，正在自动连接…' : '已记住这台电脑。点击「恢复连接」即可继续。');
 render();
-async function initializeConnection() {
-  await checkHost();
-  if (state.host && state.token && !state.active && !document.hidden) await resume(true, true);
+function initializeConnection() {
+  if (state.connectionTask) return state.connectionTask;
+  const task = (async () => {
+    await checkHost();
+    if (state.host && shouldReconnect() && !controlsEnabled()) await resume(true, true);
+  })();
+  state.connectionTask = task;
+  void task.catch(() => {}).finally(() => {
+    if (state.connectionTask === task) state.connectionTask = null;
+    scheduleReconnect();
+  });
+  return task;
 }
 void initializeConnection();

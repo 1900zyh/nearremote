@@ -29,7 +29,7 @@
     <aside class="sidebar">
       <a class="brand" href="/host" aria-label="NearRemote 电脑控制台"><span class="brand-mark"><svg><use href="#i-display"/></svg></span><span>near<span class="brand-light">remote</span><small>让设备，靠近一点。</small></span></a>
       <div class="nav-item"><svg><use href="#i-display"/></svg><span>电脑控制台</span><span class="nav-dot"></span></div>
-      <div class="sidebar-note"><span class="note-icon"><svg><use href="#i-shield"/></svg></span><h2>控制权，在你手上</h2><p>只有在这台电脑上批准的设备，才能查看和操作桌面。</p><p class="note-subtle">手机无需安装 App，打开 Safari 即可。</p></div>
+      <div class="sidebar-note"><span class="note-icon"><svg><use href="#i-shield"/></svg></span><h2>控制权，在你手上</h2><p>首次批准后会记住设备，电脑重启也会保留授权。</p><p class="note-subtle">无需重复配对。你可随时在这里撤销设备授权。</p></div>
       <div class="sidebar-bottom"><span class="tiny-dot"></span>本机管理 · 仅此电脑可见</div>
     </aside>
 
@@ -40,9 +40,9 @@
       <div id="error-banner" class="error-banner" role="status" hidden></div>
 
       <div class="connect-grid">
-        <section class="card address-card" aria-labelledby="address-heading"><div class="section-kicker"><span>01</span>从手机打开</div><h2 id="address-heading">一个地址，就能连接。</h2><p class="card-description">在 iPhone Safari 中输入下方地址。<br class="desktop-break">手机与电脑需要连接同一 Wi-Fi。</p><div id="connection-addresses" class="address-list"><div class="address-placeholder">正在获取局域网地址…</div></div><a class="preview-link" href="/">在此电脑预览手机控制页<svg><use href="#i-arrow"/></svg></a></section>
+        <section class="card address-card" aria-labelledby="address-heading"><div class="section-kicker"><span>01</span>从手机打开</div><h2 id="address-heading">一个地址，就能连接。</h2><p class="card-description">在 iPhone Safari 中输入下方地址。<br class="desktop-break">手机与电脑需要连接同一 Wi-Fi。</p><div id="connection-addresses" class="address-list"><div class="address-placeholder">正在获取局域网地址…</div></div><p class="address-memory-note">建议收藏此地址。路由器保留本机 IP，可避免重启后地址变化。</p><a class="preview-link" href="/">在此电脑预览手机控制页<svg><use href="#i-arrow"/></svg></a></section>
 
-        <section class="card pairing-card" aria-labelledby="pairing-heading"><div class="section-kicker"><span>02</span>首次配对你的设备</div><div class="card-heading-row"><h2 id="pairing-heading">输入六位配对码</h2><button type="button" class="icon-button" id="refresh-code" aria-label="刷新配对码" title="生成新的配对码"><svg><use href="#i-refresh"/></svg></button></div><p class="card-description">首次在手机输入并在这里批准，之后会记住此浏览器，打开页面自动连接。</p><div id="host-code" class="pairing-code" aria-label="配对码">······</div><div class="code-footer"><span class="code-tag"><span class="tiny-dot"></span>短期有效</span><span id="code-expiry">正在加载…</span></div></section>
+        <section class="card pairing-card" aria-labelledby="pairing-heading"><div class="section-kicker"><span>02</span>首次配对你的设备</div><div class="card-heading-row"><h2 id="pairing-heading">输入六位配对码</h2><button type="button" class="icon-button" id="refresh-code" aria-label="刷新配对码" title="生成新的配对码"><svg><use href="#i-refresh"/></svg></button></div><p class="card-description">首次输入并批准后长期记住此浏览器，电脑重启后无需再次配对。</p><div id="host-code" class="pairing-code" aria-label="配对码">······</div><div class="code-footer"><span class="code-tag"><span class="tiny-dot"></span>短期有效</span><span id="code-expiry">正在加载…</span></div></section>
       </div>
 
       <section class="devices-section" aria-labelledby="devices-heading"><div class="section-heading"><div><p class="eyebrow">DEVICE ACCESS</p><h2 id="devices-heading">信任的设备，由你决定</h2></div><button type="button" id="revoke-all" class="button danger-button" disabled><svg><use href="#i-stop"/></svg>撤销全部授权</button></div>

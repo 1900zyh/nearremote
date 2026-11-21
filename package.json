@@ -6,14 +6,20 @@
   "description": "iPhone and Windows LAN remote-control prototype",
   "engines": { "node": ">=20" },
   "scripts": {
-    "start": "node server.js --open",
+    "start": "powershell.exe -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File scripts/start-background.ps1 -OpenBrowser",
+    "stop": "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/stop-background.ps1",
+    "start:console": "node server.js --open",
     "check": "node --check server.js && node --check video-stream.js && node --check public/app.js && node --check public/host.js",
     "test": "node --test server.test.js video-stream.test.js",
     "test:browser": "node scripts/browser-smoke.mjs",
+    "test:reconnect": "node scripts/browser-reconnect-smoke.mjs",
+    "test:cursor": "node scripts/browser-cursor-smoke.mjs",
+    "test:launcher": "node scripts/launcher-smoke.mjs",
     "test:ipad": "node scripts/browser-ipad-smoke.mjs",
     "test:video": "node scripts/browser-video-smoke.mjs",
     "test:video:live": "node scripts/browser-live-benchmark.mjs",
     "setup:video": "node scripts/setup-video.mjs",
-    "benchmark:video": "node scripts/benchmark-video.mjs"
+    "benchmark:video": "node scripts/benchmark-video.mjs",
+    "package": "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/package.ps1"
   }
 }

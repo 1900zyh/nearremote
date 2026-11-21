@@ -83,7 +83,7 @@
     const art = element('span', 'empty-icon');
     art.append(icon(pending ? 'link' : 'phone'));
     empty.append(art, element('strong', '', pending ? '等待你的手机' : '还没有授权的设备'));
-    empty.append(element('p', '', pending ? '手机发送配对请求后，会显示在这里。' : '首次批准后会记住此浏览器，下次打开自动连接。'));
+    empty.append(element('p', '', pending ? '手机发送配对请求后，会显示在这里。' : '首次批准后长期记住设备，电脑重启后仍可自动连接。'));
     container.replaceChildren(empty);
   }
 

@@ -10,7 +10,7 @@ import { createRemoteServer } from '../server.js';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const modulePath = process.env.PLAYWRIGHT_MODULE;
 const { chromium } = await import(modulePath ? pathToFileURL(path.resolve(modulePath)).href : 'playwright');
-const output = path.join(root, 'test-results', 'remote-control');
+const output = process.env.TEST_OUTPUT_DIR ? path.resolve(process.env.TEST_OUTPUT_DIR) : path.join(root, 'test-results', 'remote-control');
 await fs.mkdir(output, { recursive: true });
 const browser = await chromium.launch({ headless: true, ...(process.env.BROWSER_EXECUTABLE ? { executablePath: process.env.BROWSER_EXECUTABLE } : {}) });
 const contexts = [];
@@ -320,7 +320,7 @@ try {
   assert.equal(maxCaptureInFlight, 1);
 
   await phone.locator('#connection-panel').evaluate((details) => { details.open = true; });
-  await phone.locator('#disconnect-button').click();
+  await phone.locator('#forget-device-button').click();
   await until(() => server.remoteState.tokens.size === 0, 'disconnect revokes token');
   await until(() => phone.locator('#pair-button').isVisible(), 'return to pairing');
   assert.equal(await phone.evaluate(() => localStorage.getItem('nearremote.session')), null, 'explicit revocation forgets saved authorization');

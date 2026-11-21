@@ -13,7 +13,7 @@ await fs.access(ffmpeg);
 const playwright = process.env.PLAYWRIGHT_MODULE;
 const { chromium } = await import(playwright ? pathToFileURL(path.resolve(playwright)).href : 'playwright');
 const browser = await chromium.launch({ headless: true, ...(process.env.BROWSER_EXECUTABLE ? { executablePath: process.env.BROWSER_EXECUTABLE } : {}) });
-const output = path.resolve(root, '..', 'test-results', 'remote-control');
+const output = process.env.TEST_OUTPUT_DIR ? path.resolve(process.env.TEST_OUTPUT_DIR) : path.resolve(root, '..', 'test-results', 'remote-control');
 await fs.mkdir(output, { recursive: true });
 const temporary = await fs.mkdtemp(path.join(os.tmpdir(), 'nearremote-video-test-'));
 const errors = [];
@@ -25,6 +25,7 @@ const desktopSize = tabletMode ? { width: 3840, height: 1200, displays: [
   { index: 0, x: 0, y: 0, width: 1920, height: 1200, primary: true },
   { index: 1, x: 1920, y: 0, width: 1920, height: 1080, primary: false },
 ] } : sourceSize;
+let mockCursor = { x: tabletMode ? 0.25 : 0.5, y: 0.5, visible: true, leftDown: false, rightDown: false, shape: 'arrow' };
 const calls = [];
 const encoders = new Set();
 const encodedFrameRates = [];
@@ -77,7 +78,14 @@ try {
   server = createRemoteServer({
     screen: desktopSize, deviceName: '60 帧视频测试电脑',
     addresses: new Set(['127.0.0.1']), pairCode: '654321',
-    bridge: { async send(action, data) { if (action === 'screen') { frames++; return { data: jpeg.toString('base64') }; } calls.push({ action, ...data }); return { data: true }; }, close() {} },
+    bridge: { async send(action, data) {
+      if (action === 'screen') { frames++; return { data: jpeg.toString('base64') }; }
+      if (action === 'cursor') return { data: { ...mockCursor } };
+      if (['pointer', 'click'].includes(action)) mockCursor = { ...mockCursor, x: data.x, y: data.y };
+      if (action === 'button') mockCursor[data.button === 'left' ? 'leftDown' : 'rightDown'] = data.down;
+      calls.push({ action, ...data });
+      return { data: true };
+    }, close() {} },
     videoFactory, onPairRequest() {},
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));

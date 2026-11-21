@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { PassThrough } from 'node:stream';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { createRemoteServer, SCREEN_PROFILES } from './server.js';
 
@@ -106,6 +107,99 @@ async function hostHeaders(base) {
 async function hostState(base) {
   return fetch(`${base}/api/host/state`, { headers: await hostHeaders(base) }).then((response) => response.json());
 }
+
+const cursorState = (overrides = {}) => ({ x: 0.25, y: 0.75, visible: true, leftDown: false, rightDown: false, shape: 'arrow', ...overrides });
+
+test('real cursor state is available only to approved bearer sessions and stays out of public status', async (t) => {
+  let samples = 0;
+  const value = cursorState({ shape: 'text', leftDown: true });
+  const { base, server } = await setup(t, { cursorBridge: { async send(action) { assert.equal(action, 'cursor'); samples++; return { data: { ...value, hCursor: 'private-native-handle' } }; }, close() {} } });
+  assert.equal((await fetch(`${base}/api/cursor`)).status, 401);
+  assert.equal((await fetch(`${base}/api/cursor?token=pretend-token`)).status, 401);
+  assert.equal(samples, 0, 'unapproved devices must not cause a native cursor read');
+  const { token } = await approvePair(base, server);
+  assert.equal((await fetch(`${base}/api/cursor?token=${token}`)).status, 401, 'URL credentials must not authorize cursor state');
+  const response = await fetch(`${base}/api/cursor`, { headers: { authorization: `Bearer ${token}` } });
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.deepEqual(result.cursor, value, 'cursor responses contain only normalized position, visibility, shape and button state');
+  assert.ok(Number.isSafeInteger(result.sampledAt) && Math.abs(Date.now() - result.sampledAt) < 5000);
+  assert.equal(samples, 1);
+  assert.equal(response.headers.get('cache-control'), 'no-store');
+  const publicStatus = await fetch(`${base}/api/status`).then((item) => item.text());
+  assert.ok(!publicStatus.includes('leftDown') && !publicStatus.includes('private-native-handle'));
+});
+
+test('simultaneous cursor readers share one native sample instead of accumulating polling work', async (t) => {
+  let samples = 0;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const { base, server } = await setup(t, { cursorBridge: { async send() { samples++; if (samples === 1) await gate; return { data: cursorState({ x: samples === 1 ? 0.25 : 0.8 }) }; }, close() {} } });
+  const { token } = await approvePair(base, server);
+  const headers = { authorization: `Bearer ${token}` };
+  const pending = Promise.all(Array.from({ length: 4 }, () => fetch(`${base}/api/cursor`, { headers })));
+  for (let attempt = 0; attempt < 50 && samples === 0; attempt++) await wait(5);
+  await wait(15);
+  assert.equal(samples, 1);
+  release();
+  const responses = await pending;
+  for (const response of responses) {
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).cursor.x, 0.25);
+  }
+  assert.equal(samples, 1);
+  await wait(35);
+  const next = await fetch(`${base}/api/cursor`, { headers }).then((response) => response.json());
+  assert.equal(next.cursor.x, 0.8, 'movement becomes visible after the short shared-sample lifetime');
+  assert.equal(samples, 2);
+});
+
+test('revoking a session while a cursor read is pending prevents the sampled state from being returned', async (t) => {
+  let entered = false;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const { base, server } = await setup(t, { cursorBridge: { async send() { entered = true; await gate; return { data: cursorState() }; }, close() {} } });
+  const { token } = await approvePair(base, server);
+  const pending = fetch(`${base}/api/cursor`, { headers: { authorization: `Bearer ${token}` } });
+  for (let attempt = 0; attempt < 50 && !entered; attempt++) await wait(5);
+  assert.equal(entered, true);
+  await server.remoteState.revokeToken(token);
+  release();
+  const response = await pending;
+  assert.equal(response.status, 401);
+  assert.ok(!Object.hasOwn(await response.json(), 'cursor'));
+});
+
+test('malformed or unavailable native cursor samples fail safely without disabling input', async (t) => {
+  let value;
+  const { base, server, calls } = await setup(t, { cursorBridge: { async send() { if (value instanceof Error) throw value; return { data: value }; }, close() {} } });
+  const { token } = await approvePair(base, server);
+  const headers = { authorization: `Bearer ${token}`, 'content-type': 'application/json' };
+  for (value of [true, null, cursorState({ x: NaN }), cursorState({ y: 1.01 }), cursorState({ visible: 1 }), cursorState({ shape: 'untrusted-shape' }), new Error('private native exception')]) {
+    const response = await fetch(`${base}/api/cursor`, { headers });
+    assert.equal(response.status, 503);
+    assert.ok(!(await response.text()).includes('private native exception'));
+  }
+  value = cursorState({ visible: false, shape: 'hand', rightDown: true });
+  const response = await fetch(`${base}/api/cursor`, { headers }).then((result) => result.json());
+  assert.deepEqual(response.cursor, value);
+  const input = await fetch(`${base}/api/input`, { method: 'POST', headers, body: JSON.stringify({ action: 'key', key: 'ENTER' }) });
+  assert.equal(input.status, 200);
+  assert.equal(calls.at(-1).action, 'key');
+});
+
+test('cursor polling is rate-limited per authorization and closes a dedicated bridge once', async (t) => {
+  let closed = 0;
+  const shared = { async send() { return { data: cursorState() }; }, close() { closed++; } };
+  const { base, server } = await setup(t, { cursorBridge: shared, captureBridge: shared });
+  const { token } = await approvePair(base, server);
+  const statuses = await Promise.all(Array.from({ length: 50 }, () => fetch(`${base}/api/cursor`, { headers: { authorization: `Bearer ${token}` } }).then((response) => response.status)));
+  assert.equal(statuses.filter((status) => status === 200).length, 45);
+  assert.equal(statuses.filter((status) => status === 429).length, 5);
+  await server.shutdown();
+  await server.shutdown();
+  assert.equal(closed, 1, 'a cursor bridge also used for screenshots must not be closed twice');
+});
 
 test('pairing requires the short code and explicit local approval before controller access', async (t) => {
   const { base, server, approvalInput } = await setup(t);
@@ -640,4 +734,66 @@ test('corrupt or unsupported trust files fail closed without silently accepting 
     assert.throws(() => createRemoteServer({ bridge: { close() {} }, trustStorePath: filename }), /无法读取已记住的设备授权/);
     assert.equal(await fs.readFile(filename, 'utf8'), text, 'corrupt data must be preserved for repair');
   }
+});
+
+test('the same computer identity survives restart alongside its remembered device authorization', async (t) => {
+  const trustStorePath = await trustStore(t);
+  const identityPath = path.join(path.dirname(trustStorePath), 'server-id.json');
+  const first = await setup(t, { trustStorePath, identityPath });
+  const originalStatus = await fetch(`${first.base}/api/status`).then((response) => response.json());
+  assert.match(originalStatus.serverId, /^[a-f0-9-]{36}$/);
+  const authorization = await approvePair(first.base, first.server, { deviceId: 'remembered-browser-0001' });
+  const trustedBefore = await fs.readFile(trustStorePath, 'utf8');
+  await first.server.shutdown();
+
+  const restarted = await setup(t, { trustStorePath, identityPath });
+  const restartedStatus = await fetch(`${restarted.base}/api/status`).then((response) => response.json());
+  assert.equal(restartedStatus.serverId, originalStatus.serverId);
+  assert.equal(JSON.parse(await fs.readFile(identityPath, 'utf8')).id, originalStatus.serverId);
+  assert.equal(await fetch(`${restarted.base}/api/screen.jpg`, { headers: { authorization: `Bearer ${authorization.token}` } }).then((response) => response.status), 200);
+  assert.equal(await fs.readFile(trustStorePath, 'utf8'), trustedBefore, 'identity initialization must not rewrite remembered authorization');
+});
+
+test('invalid computer identity files stop initialization without deleting trust or identity files', async (t) => {
+  const trustStorePath = await trustStore(t);
+  const identityPath = path.join(path.dirname(trustStorePath), 'server-id.json');
+  const trusted = '{"version":1,"devices":[]}';
+  await fs.writeFile(trustStorePath, trusted, 'utf8');
+  for (const contents of ['broken JSON', '{"version":2,"id":"550e8400-e29b-41d4-a716-446655440000"}', '{"version":1,"id":"short"}']) {
+    await fs.writeFile(identityPath, contents, 'utf8');
+    assert.throws(() => createRemoteServer({ identityPath, trustStorePath, bridge: { close() {} } }), /无法读取电脑标识/);
+    assert.equal(await fs.readFile(identityPath, 'utf8'), contents);
+    assert.equal(await fs.readFile(trustStorePath, 'utf8'), trusted);
+  }
+});
+
+test('library callers can supply a computer identity without creating user configuration files', async (t) => {
+  const serverId = '550e8400-e29b-41d4-a716-446655440000';
+  const { base, server } = await setup(t, { serverId });
+  assert.equal(server.remoteState.serverId, serverId);
+  assert.equal((await fetch(`${base}/api/status`).then((response) => response.json())).serverId, serverId);
+  assert.throws(() => createRemoteServer({ serverId: 'invalid', bridge: { close() {} } }), /serverId/);
+});
+
+test('authenticated local shutdown closes the server without forgetting paired devices', async (t) => {
+  const trustStorePath = await trustStore(t);
+  const { base, server } = await setup(t, { trustStorePath });
+  const authorization = await approvePair(base, server, { deviceId: 'shutdown-browser-0001' });
+  const saved = await fs.readFile(trustStorePath, 'utf8');
+  const status = await fetch(`${base}/api/status`).then((response) => response.json());
+  assert.equal(status.localProcess.pid, process.pid);
+  assert.equal(status.localProcess.projectDirectory, path.dirname(fileURLToPath(import.meta.url)));
+  assert.equal(await fetch(`${base}/api/host/shutdown`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+  }).then((response) => response.status), 403, 'a localhost caller still needs the local administration token');
+  const shutdownComplete = new Promise((resolve) => server.once('shutdown-complete', resolve));
+  assert.equal(await fetch(`${base}/api/host/shutdown`, {
+    method: 'POST', headers: await hostHeaders(base), body: '{}',
+  }).then((response) => response.status), 200);
+  await shutdownComplete;
+  assert.equal(server.listening, false);
+  assert.equal(await fs.readFile(trustStorePath, 'utf8'), saved);
+
+  const restarted = await setup(t, { trustStorePath });
+  assert.equal(await fetch(`${restarted.base}/api/screen.jpg`, { headers: { authorization: `Bearer ${authorization.token}` } }).then((response) => response.status), 200);
 });

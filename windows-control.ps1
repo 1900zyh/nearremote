@@ -8,6 +8,7 @@ using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
+using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -69,6 +70,32 @@ public static class NearRemoteWin32
         public int Bottom;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINT
+    {
+        public int X;
+        public int Y;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct CURSORINFO
+    {
+        public int cbSize;
+        public uint flags;
+        public IntPtr hCursor;
+        public POINT ptScreenPos;
+    }
+
+    public sealed class CursorState
+    {
+        public double x { get; set; }
+        public double y { get; set; }
+        public bool visible { get; set; }
+        public bool leftDown { get; set; }
+        public bool rightDown { get; set; }
+        public string shape { get; set; }
+    }
+
     [DllImport("user32.dll", SetLastError = true)]
     private static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
 
@@ -77,6 +104,30 @@ public static class NearRemoteWin32
 
     [DllImport("user32.dll")]
     private static extern int GetSystemMetrics(int nIndex);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool GetCursorInfo(ref CURSORINFO cursorInfo);
+
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int virtualKey);
+
+    [DllImport("user32.dll", EntryPoint = "LoadCursorW")]
+    private static extern IntPtr LoadCursor(IntPtr instance, IntPtr name);
+
+    private static readonly KeyValuePair<IntPtr, string>[] systemCursors = new[] {
+        new KeyValuePair<IntPtr, string>(LoadCursor(IntPtr.Zero, new IntPtr(32512)), "arrow"),
+        new KeyValuePair<IntPtr, string>(LoadCursor(IntPtr.Zero, new IntPtr(32513)), "text"),
+        new KeyValuePair<IntPtr, string>(LoadCursor(IntPtr.Zero, new IntPtr(32514)), "wait"),
+        new KeyValuePair<IntPtr, string>(LoadCursor(IntPtr.Zero, new IntPtr(32650)), "wait"),
+        new KeyValuePair<IntPtr, string>(LoadCursor(IntPtr.Zero, new IntPtr(32515)), "crosshair"),
+        new KeyValuePair<IntPtr, string>(LoadCursor(IntPtr.Zero, new IntPtr(32649)), "hand"),
+        new KeyValuePair<IntPtr, string>(LoadCursor(IntPtr.Zero, new IntPtr(32644)), "size-we"),
+        new KeyValuePair<IntPtr, string>(LoadCursor(IntPtr.Zero, new IntPtr(32645)), "size-ns"),
+        new KeyValuePair<IntPtr, string>(LoadCursor(IntPtr.Zero, new IntPtr(32642)), "size-nwse"),
+        new KeyValuePair<IntPtr, string>(LoadCursor(IntPtr.Zero, new IntPtr(32643)), "size-nesw"),
+        new KeyValuePair<IntPtr, string>(LoadCursor(IntPtr.Zero, new IntPtr(32646)), "move"),
+        new KeyValuePair<IntPtr, string>(LoadCursor(IntPtr.Zero, new IntPtr(32648)), "not-allowed"),
+    };
 
     private static bool leftDown;
     private static bool rightDown;
@@ -97,6 +148,26 @@ public static class NearRemoteWin32
         int height = GetSystemMetrics(79);
         if (width <= 0 || height <= 0) throw new InvalidOperationException("Could not read Windows desktop dimensions");
         return new[] { left, top, width, height };
+    }
+
+    public static CursorState ReadCursor()
+    {
+        CURSORINFO info = new CURSORINFO { cbSize = Marshal.SizeOf(typeof(CURSORINFO)) };
+        if (!GetCursorInfo(ref info)) throw new InvalidOperationException("Could not read the desktop cursor");
+        int[] bounds = ScreenBounds();
+        string shape = "arrow";
+        foreach (KeyValuePair<IntPtr, string> known in systemCursors)
+        {
+            if (known.Key != IntPtr.Zero && known.Key == info.hCursor) { shape = known.Value; break; }
+        }
+        return new CursorState {
+            x = Math.Max(0, Math.Min(1, (double)(info.ptScreenPos.X - bounds[0]) / Math.Max(1, bounds[2] - 1))),
+            y = Math.Max(0, Math.Min(1, (double)(info.ptScreenPos.Y - bounds[1]) / Math.Max(1, bounds[3] - 1))),
+            visible = (info.flags & 1) != 0 && (info.flags & 2) == 0,
+            leftDown = (GetAsyncKeyState(0x01) & 0x8000) != 0,
+            rightDown = (GetAsyncKeyState(0x02) & 0x8000) != 0,
+            shape = shape,
+        };
     }
 
     private static void PrepareCapture(int width, int height)
@@ -292,6 +363,7 @@ try {
         }
         $data = @{ width = $bounds[2]; height = $bounds[3]; displays = $displays }
       }
+      'cursor' { $data = [NearRemoteWin32]::ReadCursor() }
       'screen' {
         $maxWidth = 1920
         $maxHeight = 1080

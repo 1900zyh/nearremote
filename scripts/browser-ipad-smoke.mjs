@@ -10,7 +10,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '.
 const moduleName = process.env.PLAYWRIGHT_MODULE;
 const { chromium } = await import(moduleName ? pathToFileURL(path.resolve(moduleName)).href : 'playwright');
 const browser = await chromium.launch({ headless: true, ...(process.env.BROWSER_EXECUTABLE ? { executablePath: process.env.BROWSER_EXECUTABLE } : {}) });
-const output = path.join(root, 'test-results', 'remote-control');
+const output = process.env.TEST_OUTPUT_DIR ? path.resolve(process.env.TEST_OUTPUT_DIR) : path.join(root, 'test-results', 'remote-control');
 await fs.mkdir(output, { recursive: true });
 const desktop = { width: 3840, height: 1200, displays: [
   { index: 0, x: 0, y: 0, width: 1920, height: 1200, primary: true },
