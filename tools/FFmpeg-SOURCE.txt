@@ -1,0 +1,10 @@
+FFmpeg Windows essentials build by Gyan Doshi.
+Upstream: https://ffmpeg.org/
+Build/download/source information: https://www.gyan.dev/ffmpeg/builds/
+Archive: https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
+Publisher archive checksum URL: https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip.sha256
+Publisher archive SHA-256: b9bbbb3acece000cbeec994f856649354e52c773807841e78908374b24d658fd
+Installed executable SHA-256: ED8F66CB877087A96F5BBB40A2944F0E764F2AD8870D5CB647360D912E62BC07
+License: see FFmpeg-LICENSE.txt
+This executable was extracted from the publisher's SHA-256-verified archive during setup.
+

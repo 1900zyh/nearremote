@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f4f5f1">
+  <meta name="host-token" content="__HOST_TOKEN__">
+  <title>NearRemote · 电脑控制台</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/host.css">
+  <script src="/host.js" defer></script>
+</head>
+<body>
+  <svg class="icon-defs" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><defs>
+    <symbol id="i-display" viewBox="0 0 24 24"><rect x="3" y="3.5" width="18" height="13" rx="2.5"/><path d="M8 21h8m-4-4.5V21"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14m-6-6 6 6-6 6"/></symbol>
+    <symbol id="i-link" viewBox="0 0 24 24"><path d="m10 13 4-4m-6 6-1 1a4 4 0 0 1-5.7-5.7l4-4A4 4 0 0 1 12 6m0 12a4 4 0 0 0 5.7-.3l4-4A4 4 0 0 0 16 8l-1 1" transform="translate(1 1) scale(.9)"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M15 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h3"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 10a8 8 0 0 0-14-5L3 8m0-5v5h5M4 14a8 8 0 0 0 14 5l3-3m0 5v-5h-5"/></symbol>
+    <symbol id="i-phone" viewBox="0 0 24 24"><rect x="6" y="2" width="12" height="20" rx="3"/><path d="M10 5h4m-3 14h2"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="m12 2 8 3v6c0 5-3.5 8.5-8 11-4.5-2.5-8-6-8-11V5l8-3Z"/><path d="m8.5 11.5 2.5 2.5 4.5-5"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="3"/></symbol>
+    <symbol id="i-signal" viewBox="0 0 24 24"><path d="M2 8a16 16 0 0 1 20 0M5 12a11 11 0 0 1 14 0m-11 4a6 6 0 0 1 8 0"/><circle cx="12" cy="20" r=".7"/></symbol>
+  </defs></svg>
+
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="/host" aria-label="NearRemote 电脑控制台"><span class="brand-mark"><svg><use href="#i-display"/></svg></span><span>near<span class="brand-light">remote</span><small>让设备，靠近一点。</small></span></a>
+      <div class="nav-item"><svg><use href="#i-display"/></svg><span>电脑控制台</span><span class="nav-dot"></span></div>
+      <div class="sidebar-note"><span class="note-icon"><svg><use href="#i-shield"/></svg></span><h2>控制权，在你手上</h2><p>只有在这台电脑上批准的设备，才能查看和操作桌面。</p><p class="note-subtle">手机无需安装 App，打开 Safari 即可。</p></div>
+      <div class="sidebar-bottom"><span class="tiny-dot"></span>本机管理 · 仅此电脑可见</div>
+    </aside>
+
+    <main class="main-content">
+      <header class="page-header"><div><p class="eyebrow">YOUR DESK, WITHIN REACH</p><h1>把电脑，交到手边。</h1><p class="page-subtitle">连接同一 Wi-Fi，用手机轻松掌控桌面。</p></div><div class="status-pill" id="status-pill"><span class="status-dot"></span><span id="host-status" role="status">正在连接</span></div></header>
+
+      <section class="computer-strip" aria-label="当前电脑"><span class="computer-icon"><svg><use href="#i-display"/></svg></span><div><strong id="computer-name">正在读取电脑信息…</strong><span id="screen-size">Windows 主机</span></div><span class="computer-label">当前电脑</span></section>
+      <div id="error-banner" class="error-banner" role="status" hidden></div>
+
+      <div class="connect-grid">
+        <section class="card address-card" aria-labelledby="address-heading"><div class="section-kicker"><span>01</span>从手机打开</div><h2 id="address-heading">一个地址，就能连接。</h2><p class="card-description">在 iPhone Safari 中输入下方地址。<br class="desktop-break">手机与电脑需要连接同一 Wi-Fi。</p><div id="connection-addresses" class="address-list"><div class="address-placeholder">正在获取局域网地址…</div></div><a class="preview-link" href="/">在此电脑预览手机控制页<svg><use href="#i-arrow"/></svg></a></section>
+
+        <section class="card pairing-card" aria-labelledby="pairing-heading"><div class="section-kicker"><span>02</span>首次配对你的设备</div><div class="card-heading-row"><h2 id="pairing-heading">输入六位配对码</h2><button type="button" class="icon-button" id="refresh-code" aria-label="刷新配对码" title="生成新的配对码"><svg><use href="#i-refresh"/></svg></button></div><p class="card-description">首次在手机输入并在这里批准，之后会记住此浏览器，打开页面自动连接。</p><div id="host-code" class="pairing-code" aria-label="配对码">······</div><div class="code-footer"><span class="code-tag"><span class="tiny-dot"></span>短期有效</span><span id="code-expiry">正在加载…</span></div></section>
+      </div>
+
+      <section class="devices-section" aria-labelledby="devices-heading"><div class="section-heading"><div><p class="eyebrow">DEVICE ACCESS</p><h2 id="devices-heading">信任的设备，由你决定</h2></div><button type="button" id="revoke-all" class="button danger-button" disabled><svg><use href="#i-stop"/></svg>撤销全部授权</button></div>
+        <div class="device-grid"><section class="card device-card" aria-labelledby="pending-heading"><div class="device-card-heading"><h3 id="pending-heading">等待确认<span class="count-badge" id="pending-count">0</span></h3><span class="list-caption">只批准你认识的设备</span></div><div id="pending-devices" class="device-list"><div class="empty-state"><span class="empty-icon"><svg><use href="#i-link"/></svg></span><strong>等待你的手机</strong><p>手机发送配对请求后，<br>会显示在这里。</p></div></div></section>
+        <section class="card device-card" aria-labelledby="active-heading"><div class="device-card-heading"><h3 id="active-heading">已授权设备<span class="count-badge" id="active-count">0</span></h3><span class="list-caption">撤销后需重新配对</span></div><div id="active-sessions" class="device-list"><div class="empty-state"><span class="empty-icon"><svg><use href="#i-phone"/></svg></span><strong>还没有授权的设备</strong><p>首次批准后会记住此浏览器，<br>下次打开自动连接。</p></div></div></section></div>
+      </section>
+
+      <footer class="page-footer"><div><svg><use href="#i-signal"/></svg><span>仅在可信任的局域网中使用</span></div><span>NEARREMOTE · LOCAL & CONNECTED</span></footer>
+      <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+    </main>
+  </div>
+</body>
+</html>

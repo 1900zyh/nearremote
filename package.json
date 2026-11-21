@@ -1,0 +1,19 @@
+{
+  "name": "nearremote-lan",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "iPhone and Windows LAN remote-control prototype",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node server.js --open",
+    "check": "node --check server.js && node --check video-stream.js && node --check public/app.js && node --check public/host.js",
+    "test": "node --test server.test.js video-stream.test.js",
+    "test:browser": "node scripts/browser-smoke.mjs",
+    "test:ipad": "node scripts/browser-ipad-smoke.mjs",
+    "test:video": "node scripts/browser-video-smoke.mjs",
+    "test:video:live": "node scripts/browser-live-benchmark.mjs",
+    "setup:video": "node scripts/setup-video.mjs",
+    "benchmark:video": "node scripts/benchmark-video.mjs"
+  }
+}
